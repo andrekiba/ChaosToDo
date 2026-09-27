@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="ChaosToDo.Api/ChaosToDo.Api.csproj" />
+  <Project Path="ChaosToDo.AppHost/ChaosToDo.AppHost.csproj" />
+  <Project Path="ChaosToDo.ServiceDefaults/ChaosToDo.ServiceDefaults.csproj" />
+</Solution>
