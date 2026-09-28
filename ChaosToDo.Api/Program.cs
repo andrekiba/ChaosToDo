@@ -1,6 +1,8 @@
 using ChaosToDo.Api.Data;
 using ChaosToDo.Api.Models;
+using ChaosToDo.ServiceDefaults;
 using Microsoft.EntityFrameworkCore;
+using Scalar.AspNetCore;
 using ZiggyCreatures.Caching.Fusion;
 using ZiggyCreatures.Caching.Fusion.Serialization.SystemTextJson;
 
@@ -47,10 +49,10 @@ var app = builder.Build();
 
 app.MapDefaultEndpoints();
 
-if (app.Environment.IsDevelopment())
-{
-    app.MapOpenApi();
-}
+// Mapped unconditionally (not just in Development) so Scalar is also reachable on the
+// deployed Azure App Service during the conference demo.
+app.MapOpenApi();
+app.MapScalarApiReference(); // UI at /scalar/v1
 
 // Create the schema and seed a few rows so the demo has data from the first run.
 using (var scope = app.Services.CreateScope())
