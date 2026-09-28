@@ -1,0 +1,14 @@
+{
+  "Azure": {
+    "SubscriptionId": "<your-azure-subscription-id>",
+    "Location": "italynorth",
+    "AllowResourceGroupCreation": true,
+    "ResourceGroup": "chaos-todo-dev-rg"
+  },
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  }
+}

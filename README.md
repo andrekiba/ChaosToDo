@@ -6,7 +6,7 @@ Una piccola API Todo in **.NET 10** con **Aspire** (ultima versione, 13.5.4), pe
 distribuita su **Azure App Service** (multi-zona) + **Azure SQL Database** + **Azure Managed Redis**,
 in modo da poter eseguire dal vivo tre Scenari di Azure Chaos Studio:
 
-1. **Compute Zone Down** — App Service su piano Premium v3 zone-redundant, 3 istanze.
+1. **Compute Zone Down** — App Service su piano Premium v3 zone-redundant, 2 istanze.
 2. **SQL DB Failover** — Azure SQL Database Business Critical, zone-redundant (failover automatico
    verso la replica HA nella zona, senza bisogno di un failover group separato).
 3. **Cache Stampede** (+ variante *with Process Crash*) — Azure Managed Redis + App Service, con
@@ -70,7 +70,9 @@ Redis. I nomi delle risorse e la region vengono chiesti in modo interattivo la p
 ## Collegare la demo agli Scenari di Chaos Studio
 
 - **Compute Zone Down**: punta lo Scenario al piano App Service (`app-service-env`) creato da questa
-  solution — è già zone-redundant con 3 istanze.
+  solution — è già zone-redundant con 2 istanze (il minimo richiesto da Azure per la
+  zone redundancy su Premium v3, sufficiente perché lo scenario funzioni: una zona
+  viene spenta, l'altra istanza resta viva).
 - **SQL DB Failover**: punta lo Scenario al database `database` sul server `sql` — è Business
   Critical e zone-redundant, quindi ha una replica HA su cui forzare il failover.
 - **Cache Stampede**: punta lo Scenario alla cache `cache` (Azure Managed Redis) e all'App Service.
@@ -83,6 +85,6 @@ Redis. I nomi delle risorse e la region vengono chiesti in modo interattivo la p
 
 - `Demo:SimulatedDbLatencyMs` in `ChaosToDo.Api/appsettings.json` — alza il valore se vuoi
   rendere ancora più evidente la differenza cache/no-cache durante la demo.
-- La SKU di Azure SQL (`BC_Gen5`, capacity 2) e del piano App Service (`P1v3`, capacity 3) sono
+- La SKU di Azure SQL (`BC_Gen5`, capacity 2) e del piano App Service (`P1v3`, capacity 2) sono
   configurate in `ChaosToDo.AppHost/AppHost.cs` — riducile se vuoi contenere i costi al di fuori
   della demo.

@@ -300,6 +300,7 @@ __pycache__/
 # local or dev appsettings
 **/appsettings.local.json
 **/appsettings.Development.json
+**/appsettings.dev.json
 
 #ui build
 dist
