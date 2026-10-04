@@ -12,7 +12,7 @@
 // None of the built-in Scenario templates (see az rest call to
 // /providers/Microsoft.Chaos/locations/{region}/actions) cover "App Service zone down"
 // directly — PaaS App Service has no zone-shutdown action, only restart/killProcess with
-// an optional Zones filter — so the three demo scenarios are defined here as custom
+// an optional Zones filter — so the compute/cache scenarios are defined here as custom
 // Scenarios composing the closest available Actions.
 
 // Aspire's AddBicepTemplate always forwards the deployment's own `location` (the resource
@@ -27,27 +27,16 @@ var chaosWorkspaceLocation = 'northeurope'
 @description('Name of the App Service site (the "api" project) to target.')
 param apiSiteName string
 
-@description('Name of the Azure SQL logical server.')
-param sqlServerName string
-
-@description('Name of the Azure SQL database.')
-param sqlDatabaseName string
-
 @description('Name of the Azure Managed Redis resource.')
 param redisName string
 
 // Built-in role definition IDs recommended by the Microsoft.Chaos action catalog
 // (GET /providers/Microsoft.Chaos/locations/{region}/actions) for each Action used below.
 var websiteContributorRoleId = 'de139f84-1756-47ae-9be6-808fbbe84772' // Website Contributor
-var sqlDbContributorRoleId = '9b7fa17d-e63e-47b0-bb0a-15c516ac86ec' // SQL DB Contributor
 var redisContributorRoleId = '3015e5ed-6856-4ab3-b2f0-b8492aa30ca6' // Azure Managed Redis Contributor
 
 resource existingSite 'Microsoft.Web/sites@2026-08-01' existing = {
   name: apiSiteName
-}
-
-resource existingSqlDatabase 'Microsoft.Sql/servers/databases@2025-01-01' existing = {
-  name: '${sqlServerName}/${sqlDatabaseName}'
 }
 
 resource existingRedis 'Microsoft.Cache/redisEnterprise@2026-09-01' existing = {
@@ -74,16 +63,6 @@ resource siteRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01'
     principalId: workspace.identity.principalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', websiteContributorRoleId)
-  }
-}
-
-resource sqlRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(existingSqlDatabase.id, workspace.id, sqlDbContributorRoleId)
-  scope: existingSqlDatabase
-  properties: {
-    principalId: workspace.identity.principalId
-    principalType: 'ServicePrincipal'
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', sqlDbContributorRoleId)
   }
 }
 
@@ -133,36 +112,7 @@ resource computeZoneDown 'Microsoft.Chaos/workspaces/scenarios@2026-08-01-previe
   }
 }
 
-// Scenario 2: SQL DB Failover.
-// Business Critical + zone-redundant, so this fails over to the local HA replica —
-// no geo-replication / failover group needed.
-resource sqlDbFailover 'Microsoft.Chaos/workspaces/scenarios@2026-08-01-preview' = {
-  parent: workspace
-  name: 'sql-db-failover'
-  properties: {
-    description: 'Forces a planned failover of the Business Critical database to its zone-redundant HA replica.'
-    parameters: []
-    actions: [
-      {
-        name: 'db-failover'
-        actionId: 'urn:csci:microsoft:sql:failover/1.0.0'
-        description: 'Fail over to the local HA replica (planned, no data loss).'
-        duration: 'PT5M'
-        externalResource: {
-          resourceId: existingSqlDatabase.id
-        }
-        parameters: [
-          {
-            key: 'ForceAllowDataLoss'
-            value: 'false'
-          }
-        ]
-      }
-    ]
-  }
-}
-
-// Scenario 3a: Cache Stampede.
+// Scenario 2: Cache Stampede.
 // Flushes Redis so every concurrent reader falls through to the origin at once,
 // exercising FusionCache's stampede protection.
 resource cacheStampede 'Microsoft.Chaos/workspaces/scenarios@2026-08-01-preview' = {
@@ -185,7 +135,7 @@ resource cacheStampede 'Microsoft.Chaos/workspaces/scenarios@2026-08-01-preview'
   }
 }
 
-// Scenario 3b: Cache Stampede with Process Crash.
+// Scenario 3: Cache Stampede with Process Crash.
 // Same as above, plus killing the App Service worker process at the same time,
 // combining a cache-layer failure with a compute failure.
 resource cacheStampedeWithProcessCrash 'Microsoft.Chaos/workspaces/scenarios@2026-08-01-preview' = {
