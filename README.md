@@ -2,19 +2,19 @@
 
 App demo per la sessione "Chaos Engineering su Azure" (Azure AI Day Torino).
 
-Una piccola API Todo in **.NET 10** con **Aspire** (ultima versione, 13.5.4), pensata per essere
+Una piccola API Todo in **.NET 10** con **Aspire 13.6.0**, pensata per essere
 distribuita su **Azure App Service** (multi-zona) + **Azure SQL Database** + **Azure Managed Redis**,
 per preparare una demo di resilienza con Azure Chaos Studio:
 
 1. **Compute Zone Down** — App Service su piano Premium v3 zone-redundant, 2 istanze.
-2. **SQL HA locale (rinviato)** — Azure SQL Database Business Critical con repliche HA
-   locali, senza ridondanza di zona. Lo scenario SQL non viene pubblicato: l'Action
-   nativa SQL di Chaos Studio esegue geo-failover, non failover delle repliche HA locali.
+2. **SQL HA locale** — Azure SQL Database Business Critical con repliche HA
+   locali, senza ridondanza di zona. Uno scenario custom avvia un runbook Automation
+   che richiede un failover coordinato della replica primaria.
 3. **Cache Stampede** (+ variante *with Process Crash*) — Azure Managed Redis + App Service, con
    [FusionCache](https://github.com/ZiggyCreatures/FusionCache) davanti a Entity Framework Core per
    mostrare la protezione dallo stampede quando la cache viene svuotata.
 
-Il template pubblica tre scenari custom compute/cache. La disponibilità delle Actions
+Il template pubblica quattro scenari custom compute/cache/SQL. La disponibilità delle Actions
 preview va verificata prima della demo: in particolare, la documentazione attuale indica
 **App Service Kill Process solo per Windows**, mentre questo progetto usa Linux.
 
@@ -153,9 +153,11 @@ di `AppHost.cs`. La descrizione seguente si riferisce all'output esaminato con A
 **13.6.0**, dopo `aspire publish -e dev`, in ambiente **dev**: nomi, proprietà e
 file possono cambiare dopo un nuovo publish o una modifica dell'AppHost.
 
-La sorgente da mantenere è `ChaosToDo.AppHost/AppHost.cs`, insieme al template custom
-`ChaosToDo.AppHost/bicep/chaos-studio.bicep`. Modificare solo i file in `aspire-output`
-non modifica il modello Aspire e un successivo publish può sovrascrivere le modifiche.
+Le sorgenti da mantenere sono `ChaosToDo.AppHost/AppHost.cs`, i template custom
+`ChaosToDo.AppHost/bicep/chaos-studio.bicep` e
+`ChaosToDo.AppHost/bicep/sql-failover-automation.bicep`, oltre al contenuto del runbook
+in `ChaosToDo.AppHost/runbooks/`. Modificare solo i file in `aspire-output` non modifica
+il modello Aspire e un successivo publish può sovrascrivere le modifiche.
 `aspire deploy` esegue il deployment dal modello AppHost, non usa questa cartella come
 input di un deployment precedentemente pubblicato.
 
@@ -174,7 +176,7 @@ App Service Plan
 `-- Dashboard Aspire
 
 Chaos Studio Workspace
-`-- scenari che agiscono su API e Redis (test SQL rinviato)
+`-- scenari che agiscono su API, Redis e SQL
 ```
 
 | Nel modello Aspire | Negli artefatti Azure |
@@ -187,7 +189,8 @@ Chaos Studio Workspace
 
 L'applicazione usa una sola user-assigned managed identity, `sharedIdentity`
 (nome logico Aspire `identity`, nome Azure `chaos-todo-dev-mi`). Rimangono separate
-l'identità amministrativa SQL, l'identità della dashboard e quella di Chaos Studio.
+l'identità amministrativa SQL, l'identità della dashboard, quella del Workspace
+e la user-assigned identity dell'Automation Account.
 
 | Identità | Permessi e utilizzo |
 |---|---|
@@ -195,6 +198,7 @@ l'identità amministrativa SQL, l'identità della dashboard e quella di Chaos St
 | `chaos-todo-dev-sql-admin-mi` | Amministratore Entra del server SQL; esegue lo script che concede accesso al database |
 | `chaos-todo-dev-dashboard-mi` | Reader sul Resource Group e Website Contributor sul sito API per la dashboard |
 | Identità system-assigned di `chaostodo-workspace` | Ruoli sui target necessari per le azioni Chaos Studio |
+| `chaos-todo-dev-sql-failover-mi` | Lettura e richiesta failover sul solo database SQL target; lettura dei risultati operazione SQL nel Resource Group |
 
 Il pull delle immagini usa la stessa identità dell'API mediante
 `WithAcrPullIdentity(sharedIdentity)` sull'ambiente e
@@ -207,7 +211,8 @@ Rispetto al publish precedente, `identity/identity.bicep` sostituisce
 in `app-service-env.bicep`. Il ruolo AcrPull è ora nel modulo
 `identity-roles-app-service-env-acr/identity-roles-app-service-env-acr.bicep`.
 Il modulo `api-roles-sql` non viene più generato: lo script SQL custom è integrato
-in `sql/sql.bicep`. Il totale rimane di 11 file Bicep.
+in `sql/sql.bicep`. Il publish include anche i moduli Automation e identità SQL failover; il runbook
+è caricato e pubblicato dal passaggio Aspire dedicato, non dal solo `main.bicep`.
 
 In Bicep, `resource` crea o aggiorna una risorsa, mentre `existing` la referenzia senza
 crearla. `module` distribuisce un altro template e `output` espone valori ai moduli
@@ -501,36 +506,48 @@ del deployment. Il template usa API preview per workspace e scenari; i commenti
 motivano la regione fissa con la disponibilità regionale di quel modello.
 
 Il workspace ha una system-assigned managed identity e il Resource Group come scope.
-Referenzia API e Redis come `existing` e assegna:
+Referenzia API, Redis e Automation Account come `existing` e assegna:
 
 | Target | Ruolo dell'identità workspace |
 |---|---|
 | Web App API | Website Contributor |
 | Managed Redis | Azure Managed Redis Contributor |
+| Automation Account | Custom role `runbook-runner`: lettura RBAC e runbook, lettura/creazione job, lettura stream e stop/suspend dei job, come richiesto dall'Action StartRunbook |
 
 Sono autorizzazioni per effettuare le azioni di fault, non per leggere i dati applicativi.
+La persona che avvia lo Scenario deve inoltre avere Contributor sul Workspace
+(o il permesso custom `Microsoft.Chaos/workspaces/scenarios/run/action`).
 
 | Scenario | Azione dichiarata |
 |---|---|
 | `compute-zone-down` | Kill del processo App Service nelle istanze della zona richiesta, durata `PT2M` |
 | `cache-stampede` | Flush Redis, durata `PT2M` |
 | `cache-stampede-with-process-crash` | Flush Redis e kill del processo App Service, entrambe `PT2M` |
+| `sql-local-ha-failover` | StartRunbook sul solo Automation Account, durata massima `PT15M`; il runbook attende l'LRO per al massimo 10 minuti |
 
 `compute-zone-down` non spegne una availability zone Azure: simula l'impatto
 uccidendo i processi nelle istanze della zona selezionata. L'ultimo scenario dichiara
 entrambe le azioni; la semantica temporale effettiva dipende dal motore Chaos Studio.
 Distribuire il template crea gli scenari, ma non li avvia.
 
-**Failover SQL rinviato.** Lo scenario `sql-db-failover` e il relativo ruolo
-SQL DB Contributor del workspace non vengono più pubblicati.
+**Failover SQL locale.** Lo scenario `sql-local-ha-failover` usa
+`urn:csci:microsoft:automation:startrunbook/1.0.0` con i parametri
+`RunbookName` e `RunbookParameters` (`{}`). L'azione ha un limite `PT15M`;
+il limite protegge il tempo di esecuzione, non sostituisce il cooldown SQL.
 Il catalogo Actions della preview indica che
 `urn:csci:microsoft:sql:failover/1.0.0` invoca `replicationLinks/failover` o
 `failoverGroups/failover`: richiede geo-replication o un failover group,
-non usa le repliche HA locali di Business Critical.
-Il test desiderato è invece il failover locale tramite l'API SQL
-`databases/{name}/failover`. Una possibile integrazione futura è l'Action
-StartRunbook di Chaos Studio con un runbook Automation e permessi SQL limitati;
-questa infrastruttura non è inclusa nel progetto corrente.
+non usa le repliche HA locali di Business Critical. Il runbook usa invece l'API
+SQL `databases/{name}/failover` ed è bloccato sul database esatto. La sua identity ha `Microsoft.Sql/servers/databases/read` e
+`Microsoft.Sql/servers/databases/failover/action` sul database. Perché l'header
+ARM `Location` del polling punta a un'operazione SQL regionale sotto il Resource
+Group, `Microsoft.Sql/servers/databases/operationResults/read` è assegnato a
+quel Resource Group: consente di leggere lo stato delle operazioni database lì
+presenti, ma non di leggerne o modificarne i dati. Non riceve Contributor.
+Il deployer che esegue il passaggio di pubblicazione deve disporre di
+`Microsoft.Automation/automationAccounts/runbooks/draft/content/write`,
+`runbooks/publish/action`, `runbooks/draft/read` e `runbooks/content/read`
+sull'Automation Account.
 
 Vedi [catalogo scenari Chaos Studio](https://learn.microsoft.com/azure/chaos-studio/chaos-studio-scenarios),
 [HA locale e ridondanza di zona SQL](https://learn.microsoft.com/azure/azure-sql/database/high-availability-sla-local-zone-redundancy)
@@ -539,8 +556,10 @@ Rimuovere uno scenario dal template non elimina eventuali copie già create
 da un deployment precedente.
 
 **Ordine di deployment Aspire.** `AppHost.cs` configura la pipeline affinché
-`provision-chaos-studio` dipenda da `provision-api-website`, `provision-sql` e
-`provision-cache`. Il workspace, gli scenari e le assegnazioni RBAC vengono quindi
+`provision-sql-failover-automation` dipenda dal SQL e dall'identità dedicata;
+il passaggio di publish del runbook dipende dal completamento di tale provisioning;
+`provision-chaos-studio` dipende poi dal runbook pubblicato, dal sito API, da SQL
+e da Redis. Il workspace, gli scenari e le assegnazioni RBAC vengono quindi
 distribuiti soltanto dopo il provisioning dei target. La dipendenza dal sito viene
 risolta tramite il deployment target App Service, senza confonderla con
 `.WaitFor(...)`, che governa l'esecuzione locale.
@@ -602,14 +621,150 @@ sia stato completato con successo.
 - **Compute Zone Down**: lo Scenario custom punta al sito API sul piano App Service
   zone-redundant con 2 istanze. Non spegne una zona Azure: esegue il kill del processo
   sulle istanze nella zona selezionata, simulando l'impatto sul servizio.
-- **SQL HA locale**: test rinviato. Business Critical ha repliche locali, ma non è
-  sufficiente per l'Action SQL geo-failover; non viene pubblicato uno scenario SQL
-  finché non viene implementata un'integrazione adatta.
+- **SQL HA locale**: lo Scenario custom `sql-local-ha-failover` avvia il runbook
+  Azure Automation pubblicato per richiedere il cambio della primaria HA locale.
 - **Cache Stampede**: punta lo Scenario alla cache `cache` (Azure Managed Redis) e all'App Service.
   Prima della demo, genera un po' di carico su `GET /api/todos` (es. con `hey` o `bombardier`) per
   scaldare la cache, poi lascia partire lo Scenario: mostra come con FusionCache le richieste
   concorrenti collassano su un'unica chiamata al database invece di travolgerlo. Per il "prima",
   ripeti lo stesso carico su `GET /api/todos/nocache`.
+
+## Failover SQL: obiettivo della demo e limiti
+
+**Implementato nell'AppHost:** il database `chaos-todo-dev-sqldb` è Business Critical
+Gen5, 2 vCore, con `zoneRedundant: false`. L'HA locale è già fornita dal servizio:
+non vengono create repliche aggiuntive nell'AppHost. Il modulo
+`ChaosToDo.AppHost/bicep/sql-failover-automation.bicep` crea l'Automation Account,
+il runtime PowerShell 7.4, il runbook e i ruoli minimi; il modulo
+`ChaosToDo.AppHost/bicep/chaos-studio.bicep` crea lo Scenario custom.
+Durante `aspire deploy`, il passaggio `publish-sql-local-ha-runbook` importa
+il contenuto di `ChaosToDo.AppHost/runbooks/sql-local-ha-failover.ps1`, lo pubblica
+e verifica il contenuto draft e quello pubblicato. Questo passaggio non avvia un job.
+
+### Tre livelli di protezione distinti
+
+HA significa *High Availability*, cioè alta disponibilità. In questo contesto
+"locale" significa all'interno dell'infrastruttura Azure nella stessa regione,
+non sul computer dello sviluppatore.
+
+| Caso | Distribuzione e protezione | Configurazione della demo | Cosa copre il test previsto |
+|---|---|---|---|
+| **1. HA locale** | Repliche HA locali, senza garanzia di separazione tra zone; protegge da guasti di nodo, processo, hardware e manutenzione | **Presente** con Business Critical e `zoneRedundant: false` | Recupero applicativo dopo un cambio reale e richiesto della replica primaria |
+| **2. HA zone-redundant** | Repliche distribuite tra availability zone della stessa regione; aggiunge protezione dalla perdita di una zona | **Non abilitata** sul database | Non coperto: il test non rende indisponibile una zona SQL |
+| **3. Geo-replication / disaster recovery** | Database secondario in un'altra regione, tramite active geo-replication o failover group | **Non configurata** | Non coperto: nessun cambio di regione, endpoint geografico o test di disaster recovery |
+
+Business Critical usa un'architettura simile agli Always On Availability Groups:
+una primaria serve letture e scritture e replica sincronicamente le modifiche
+alle repliche HA. Il protocollo assicura la persistenza sulle repliche necessarie
+prima di confermare il commit. Azure gestisce numero, collocazione e promozione
+delle repliche; queste fanno parte del servizio Business Critical, non sono
+database separati da aggiungere o fatturare come copie indipendenti.
+
+`zoneRedundant: false` **non disabilita l'HA**, ma non garantisce che le repliche
+sopravvivano alla perdita di un'intera zona. Il backup SQL configurato con
+ridondanza `Zone` è una proprietà distinta: non rende zone-redundant il compute.
+
+In caso di failover, Azure promuove una replica HA e mantiene lo stesso hostname
+SQL e la stessa connection string. Le connessioni aperte e le operazioni in corso
+possono interrompersi: la trasparenza dell'endpoint non elimina la necessità di
+riconnessione e gestione degli errori transitori nell'applicazione.
+
+### Fault previsto: cambio della primaria HA locale
+
+Il percorso proposto è:
+
+```text
+Scenario custom sql-local-ha-failover
+  -> Action Chaos Studio StartRunbook
+  -> Runbook Azure Automation con managed identity dedicata
+  -> API Azure SQL databases/{database}/failover, replica primaria
+  -> Attesa del completamento e registrazione dell'esito
+```
+
+Non useremo l'Action nativa `urn:csci:microsoft:sql:failover/1.0.0`:
+opera su replication link o failover group e richiede geo-replication.
+Il runbook userà invece il control plane ARM, senza connessione T-SQL,
+password SQL o accesso ai secret Redis.
+
+I nomi seguono le convenzioni del progetto, senza hash:
+Automation Account `chaos-todo-dev-automation`, user-assigned identity
+`chaos-todo-dev-sql-failover-mi`, runbook e scenario `sql-local-ha-failover`.
+Il managed identity del Workspace può leggere i runbook e avviare/leggere i job
+solo nell'Automation Account dedicato. L'identità dedicata dell'Automation Account
+può leggere e richiedere il failover sul solo database target; per il polling
+dell'header ARM `Location`, può inoltre leggere i risultati delle operazioni SQL
+nel resource group. La shared identity applicativa e l'identità SQL admin restano
+invariate e non ricevono privilegi di failover. Chi esegue il deploy deve poter
+caricare il draft, pubblicare runbook e leggere il contenuto dell'Automation Account.
+
+Il deploy crea o aggiorna l'infrastruttura e lo scenario, **non avvia un failover**.
+L'esecuzione del fault è un'operazione esplicita: avvia lo Scenario da Chaos Studio.
+Queste risorse sono publish-only, senza operazioni Azure durante `aspire run`.
+
+### Cosa misureremo
+
+| Aspetto | Evidenza da raccogliere |
+|---|---|
+| Riconnessione e connection pool | L'API sostituisce le connessioni interrotte e recupera senza restart manuale |
+| Retry EF Core / SqlClient | Configurazione effettiva dei retry, errori transitori recuperati e richieste che terminano con errore |
+| Disponibilità e latenza | Richieste riuscite/fallite, timeout e percentili di latenza prima, durante e dopo il fault |
+| Tempo di recupero applicativo | Intervallo dai primi sintomi al ritorno stabile delle risposte corrette, distinto dal completamento dell'operazione ARM |
+| Protezione FusionCache | Letture servite da cache, accessi alla factory SQL e comportamento fail-safe quando il database non risponde |
+| Scritture e consistenza | Presenza dei Todo confermati prima del fault ed esito delle scritture durante la transizione |
+
+La prima prova userà carico su `/api/todos/nocache`, per esporre direttamente
+l'interruzione SQL. Una seconda prova userà `/api/todos` con cache preriscaldata,
+per osservare la protezione di FusionCache. Le prove sono separate e non
+combineranno inizialmente anche il flush Redis, che introdurrebbe un secondo fault.
+Le richieste di scrittura saranno controllate per poter riconciliare gli esiti.
+Azure limita le richieste di failover a una ogni 15 minuti per database o pool:
+non eseguire le prove in rapida successione. Il runbook attende al massimo 10 minuti
+l'esito dell'operazione ARM; al timeout l'operazione potrebbe essere ancora in corso,
+quindi verificare lo stato prima di ritentare.
+
+La latenza artificiale di 800 ms della demo è parte del baseline e va distinta
+dal rallentamento causato dal failover. Un failover rapido potrebbe produrre
+soltanto un picco di latenza senza errori HTTP: non bisogna promettere un numero
+minimo di errori o una durata di indisponibilità.
+
+**Integrità dei dati non significa successo di tutte le richieste.** Un failover
+HA coordinato preserva i dati committed, ma una transazione in corso può fallire.
+Inoltre il commit può riuscire mentre la risposta al client viene persa:
+il chiamante non sa se la scrittura sia stata applicata. Ripetere un `POST`
+senza idempotenza applicativa può creare duplicati; il failover non fornisce
+semantica exactly-once alle richieste HTTP.
+
+### Cosa non potremo affermare
+
+Il fault sarà un **failover reale ma richiesto e coordinato**, non la distruzione
+improvvisa di un nodo o l'isolamento di una zona. Non scegliamo la replica di
+destinazione e il test non riproduce tutti gli effetti di un guasto non pianificato.
+Non valida perdite di zona o regione, interruzioni prolungate della rete o di
+Microsoft Entra, geo-failover, ripristino dei backup o scenari con perdita dati.
+
+Anche abilitando in futuro `zoneRedundant: true`, lo stesso runbook testerà
+"il recupero dell'app durante un failover di un database zone-redundant":
+**non dimostrerà di avere simulato la perdita di una zona SQL**, né garantirà
+che il cambio di primaria Business Critical avvenga verso una zona diversa.
+
+### Disponibilità della ridondanza di zona in Italy North
+
+Il primo deployment zone-redundant è stato rifiutato con `ProvisioningDisabled`.
+Nell'indagine del 4 ottobre 2026, le capabilities SQL della sottoscrizione MVP
+per Italy North, interrogate con API `2023-08-01` e `2025-01-01`, riportavano
+Business Critical disponibile, ma `zoneRedundant: false` a livello di edizione
+e `zoneRedundant: true` per la SKU `BC_Gen5_2` e la manutenzione `SQL_Default`.
+Questi segnali discordanti non dimostrano un'assenza generale del supporto regionale,
+né identificano una causa certa legata al benefit MVP, alle quote o alla capacità.
+
+Il database attuale usa `SQL_Default` ed è online senza ridondanza di zona.
+Prima di cambiare flag, SKU o regione occorre chiarire con Azure Support
+la disponibilità per questa sottoscrizione. Il test HA locale non richiede
+di risolvere prima questa restrizione.
+
+Riferimenti: [architettura HA e ridondanza di zona SQL](https://learn.microsoft.com/azure/azure-sql/database/high-availability-sla-local-zone-redundancy),
+[API Database Failover](https://learn.microsoft.com/rest/api/sql/databases/failover)
+e [catalogo scenari Chaos Studio](https://learn.microsoft.com/azure/chaos-studio/chaos-studio-scenarios).
 
 ## Personalizzare
 

@@ -30,10 +30,17 @@ param apiSiteName string
 @description('Name of the Azure Managed Redis resource.')
 param redisName string
 
+@description('Name of the Azure Automation Account that hosts the SQL local HA failover runbook.')
+param automationAccountName string
+
 // Built-in role definition IDs recommended by the Microsoft.Chaos action catalog
 // (GET /providers/Microsoft.Chaos/locations/{region}/actions) for each Action used below.
 var websiteContributorRoleId = 'de139f84-1756-47ae-9be6-808fbbe84772' // Website Contributor
 var redisContributorRoleId = '3015e5ed-6856-4ab3-b2f0-b8492aa30ca6' // Azure Managed Redis Contributor
+
+resource existingAutomation 'Microsoft.Automation/automationAccounts@2024-10-23' existing = {
+  name: automationAccountName
+}
 
 resource existingSite 'Microsoft.Web/sites@2026-08-01' existing = {
   name: apiSiteName
@@ -73,6 +80,40 @@ resource redisRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01
     principalId: workspace.identity.principalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', redisContributorRoleId)
+  }
+}
+
+resource automationRunbookRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
+  name: guid(resourceGroup().id, automationAccountName, 'chaos-studio-start-runbook')
+  properties: {
+    roleName: '${automationAccountName}-runbook-runner'
+    description: 'Allow the Chaos Studio Workspace to inspect and start runbooks in this Automation Account.'
+    type: 'CustomRole'
+    assignableScopes: [resourceGroup().id]
+    permissions: [{
+      actions: [
+        'Microsoft.Authorization/*/read'
+        'Microsoft.Automation/automationAccounts/jobs/read'
+        'Microsoft.Automation/automationAccounts/jobs/stop/action'
+        'Microsoft.Automation/automationAccounts/jobs/streams/read'
+        'Microsoft.Automation/automationAccounts/jobs/suspend/action'
+        'Microsoft.Automation/automationAccounts/jobs/write'
+        'Microsoft.Automation/automationAccounts/runbooks/read'
+      ]
+      notActions: []
+      dataActions: []
+      notDataActions: []
+    }]
+  }
+}
+
+resource automationRunbookRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(existingAutomation.id, workspace.id, automationRunbookRole.id)
+  scope: existingAutomation
+  properties: {
+    principalId: workspace.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: automationRunbookRole.id
   }
 }
 
@@ -160,6 +201,39 @@ resource cacheStampedeWithProcessCrash 'Microsoft.Chaos/workspaces/scenarios@202
         externalResource: {
           resourceId: existingSite.id
         }
+      }
+    ]
+  }
+}
+
+// Scenario 4: SQL local HA failover.
+// The StartRunbook Action starts a published Automation runbook. The runbook
+// submits one SQL Database primary failover request and waits for its ARM LRO.
+resource sqlLocalHaFailover 'Microsoft.Chaos/workspaces/scenarios@2026-08-01-preview' = {
+  parent: workspace
+  name: 'sql-local-ha-failover'
+  properties: {
+    description: 'Requests one coordinated primary local HA failover on the target SQL Business Critical database.'
+    parameters: []
+    actions: [
+      {
+        name: 'start-sql-local-ha-failover'
+        actionId: 'urn:csci:microsoft:automation:startrunbook/1.0.0'
+        description: 'Start the published SQL local HA failover runbook; no geo or zone fault is performed.'
+        duration: 'PT15M'
+        externalResource: {
+          resourceId: existingAutomation.id
+        }
+        parameters: [
+          {
+            key: 'RunbookName'
+            value: 'sql-local-ha-failover'
+          }
+          {
+            key: 'RunbookParameters'
+            value: '{}'
+          }
+        ]
       }
     ]
   }

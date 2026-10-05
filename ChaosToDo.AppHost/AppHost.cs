@@ -30,7 +30,7 @@ var sharedIdentity = builder.AddAzureUserAssignedIdentity("identity")
 // ---------------------------------------------------------------------------
 // Azure SQL Database
 // Business Critical has local HA replicas without zone redundancy.
-// The Chaos Studio SQL Action uses geo-failover, so the local HA test is deferred.
+// Local HA failover is driven by a dedicated Automation runbook, not the geo-failover Action.
 // ---------------------------------------------------------------------------
 var sql = builder.AddAzureSqlServer("sql")
     .RunAsContainer(container => container
@@ -192,14 +192,59 @@ if (builder.ExecutionContext.IsPublishMode)
 // ---------------------------------------------------------------------------
 if (builder.ExecutionContext.IsPublishMode)
 {
+    var automationAccountName = $"{projectName}-{env}-automation";
+    var failoverIdentity = builder.AddAzureUserAssignedIdentity("sql-failover-identity")
+        .ConfigureInfrastructure(infra =>
+        {
+            var identity = infra.GetProvisionableResources()
+                .OfType<Azure.Provisioning.Roles.UserAssignedIdentity>().Single();
+            identity.Name = BicepFunction.Interpolate($"{projectName}-{env}-sql-failover-mi").Compile();
+        });
+
+    var automation = builder.AddBicepTemplate("sql-failover-automation", "bicep/sql-failover-automation.bicep")
+        .WithParameter("automationAccountName", automationAccountName)
+        .WithParameter("sqlServerName", $"{projectName}-{env}-sql")
+        .WithParameter("sqlDatabaseName", sqlDatabaseName)
+        .WithParameter("identityId", failoverIdentity.Resource.Id)
+        .WithParameter("identityPrincipalId", failoverIdentity.Resource.PrincipalId);
+
     var chaosStudio = builder.AddBicepTemplate("chaos-studio", "bicep/chaos-studio.bicep")
         .WithParameter("apiSiteName", apiSiteName)
-        .WithParameter("redisName", redisName);
+        .WithParameter("redisName", redisName)
+        .WithParameter("automationAccountName", automation.GetOutput("automationAccountName"));
 
 #pragma warning disable ASPIREPIPELINES001
+    const string runbookReadyStep = "publish-sql-local-ha-runbook";
+    var subscriptionId = builder.Configuration["Azure:SubscriptionId"]
+        ?? throw new InvalidOperationException("Azure:SubscriptionId is required to publish the SQL failover runbook.");
+    var resourceGroupName = builder.Configuration["Azure:ResourceGroup"]
+        ?? throw new InvalidOperationException("Azure:ResourceGroup is required to publish the SQL failover runbook.");
+    var runbookSource = File.ReadAllText(
+        Path.Combine(builder.AppHostDirectory, "runbooks/sql-local-ha-failover.ps1"));
+    automation.WithPipelineStepFactory(runbookReadyStep,
+        context => SqlFailoverRunbookPublisher.PublishAsync(
+            context,
+            subscriptionId,
+            resourceGroupName,
+            automationAccountName,
+            $"{projectName}-{env}-sql-failover-mi",
+            $"{projectName}-{env}-sql",
+            sqlDatabaseName,
+            runbookSource),
+        requiredBy: [WellKnownPipelineSteps.Deploy],
+        description: "Import, publish and verify the SQL local HA runbook (never starts a job).");
+
     builder.Pipeline.AddPipelineConfiguration(context =>
     {
+        var automationSteps = context.GetSteps(automation.Resource, WellKnownPipelineTags.ProvisionInfrastructure).ToArray();
+        automationSteps.DependsOn(context.GetSteps(sql.Resource, WellKnownPipelineTags.ProvisionInfrastructure));
+        var readyStep = context.GetSteps(automation.Resource).Single(step => step.Name == runbookReadyStep);
+        foreach (var automationStep in automationSteps)
+        {
+            readyStep.DependsOn(automationStep.Name);
+        }
         var chaosSteps = context.GetSteps(chaosStudio.Resource, WellKnownPipelineTags.ProvisionInfrastructure).ToArray();
+        chaosSteps.DependsOn(readyStep);
         chaosSteps.DependsOn(context.GetSteps(sql.Resource, WellKnownPipelineTags.ProvisionInfrastructure));
         chaosSteps.DependsOn(context.GetSteps(cache.Resource, WellKnownPipelineTags.ProvisionInfrastructure));
 
