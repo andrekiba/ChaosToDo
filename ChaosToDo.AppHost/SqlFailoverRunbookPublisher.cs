@@ -55,10 +55,8 @@ internal static partial class SqlFailoverRunbookPublisher
         var publishedContentUri = new Uri($"{ArmEndpoint}{runbookPath}/content?api-version={AutomationApiVersion}");
 
         var credential = new DefaultAzureCredential();
-        using var client = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
-        {
-            Timeout = TimeSpan.FromSeconds(60)
-        };
+        using var client = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false });
+        client.Timeout = TimeSpan.FromSeconds(60);
         var token = await credential.GetTokenAsync(
             new TokenRequestContext([TokenScope]),
             context.CancellationToken);
@@ -173,7 +171,7 @@ internal static partial class SqlFailoverRunbookPublisher
         context.Summary.Add("SQL failover runbook", "Imported, published, and content-verified; no Automation job was started.");
     }
 
-    static async Task<ArmResponse> SendArmAsync(
+    internal static async Task<ArmResponse> SendArmAsync(
         HttpClient client,
         AccessToken token,
         HttpMethod method,
@@ -315,18 +313,20 @@ internal static partial class SqlFailoverRunbookPublisher
 
     static void EnsureContentMatches(string actual, string expected, string stage)
     {
-        static string NormalizeLineEndings(string value) =>
-            value.Replace("\r\n", "\n", StringComparison.Ordinal)
-                .Replace('\r', '\n');
-
         if (!string.Equals(NormalizeLineEndings(actual), NormalizeLineEndings(expected), StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
                 $"Azure Automation {stage} runbook content does not match the checked-in source.");
         }
+
+        return;
+
+        static string NormalizeLineEndings(string value) =>
+            value.Replace("\r\n", "\n", StringComparison.Ordinal)
+                .Replace('\r', '\n');
     }
 
-    sealed record ArmResponse(
+    internal sealed record ArmResponse(
         HttpStatusCode StatusCode,
         string Body,
         Uri? Location,

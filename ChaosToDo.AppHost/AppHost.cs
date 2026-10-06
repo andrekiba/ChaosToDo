@@ -1,14 +1,13 @@
 using Aspire.Hosting.Azure;
 using Aspire.Hosting.Pipelines;
 using Azure.Provisioning;
-using Azure.Provisioning.AppService;
 using Azure.Provisioning.Expressions;
 using Azure.Provisioning.KeyVault;
 using Azure.Provisioning.RedisEnterprise;
-using Azure.Provisioning.ContainerRegistry;
 using Azure.Provisioning.Resources;
 using Azure.Provisioning.Sql;
 using ChaosToDo.AppHost;
+using Microsoft.Extensions.Configuration;
 
 var builder = DistributedApplication.CreateBuilder(args);
 
@@ -16,8 +15,8 @@ var env = builder.Environment.EnvironmentName;
 const string projectName = "chaos-todo";
 var sqlDatabaseName = $"{projectName}-{env}-sqldb";
 var keyVaultName = $"{projectName}-{env}-kv";
-var registryName = $"chaostodo{env.ToLowerInvariant()}acr";
-var dashboardName = $"{projectName}-{env}-dashboard";
+var apiSiteName = $"{projectName}-{env}-api-win";
+var apiPlanName = $"{projectName}-{env}-plan-win";
 
 var sharedIdentity = builder.AddAzureUserAssignedIdentity("identity")
     .ConfigureInfrastructure(infra =>
@@ -90,61 +89,15 @@ if (builder.ExecutionContext.IsPublishMode)
 {
     // Customize the generated vault to retain Aspire's automatic removal in local container mode.
     var keyVault = builder.Resources.OfType<AzureKeyVaultResource>().Single(resource => resource.Name == "cache-kv");
-    builder.CreateResourceBuilder(keyVault).ConfigureInfrastructure(infra =>
+    builder.CreateResourceBuilder(keyVault)
+        .ClearDefaultRoleAssignments()
+        .ConfigureInfrastructure(infra =>
     {
         var vault = infra.GetProvisionableResources().OfType<KeyVaultService>().Single();
         vault.Name = BicepFunction.Interpolate($"{keyVaultName}").Compile();
     });
 }
 
-// ---------------------------------------------------------------------------
-// Azure App Service environment — Premium v3, zone redundant, 2 instances so
-// the plan actually spans availability zones (Azure requires at least 2
-// worker instances for a zone-redundant Premium v3 plan; 2 is the minimum
-// and is enough to demo "Compute Zone Down" — one instance survives).
-// This is the other target of "Compute Zone Down" and "Cache Stampede".
-// ---------------------------------------------------------------------------
-var appService = builder.AddAzureAppServiceEnvironment("app-service-env")
-    .ConfigureInfrastructure(infra =>
-    {
-        var resources = infra.GetProvisionableResources().ToList();
-        var plan = resources.OfType<AppServicePlan>().Single();
-        plan.Name = BicepFunction.Interpolate($"{projectName}-{env}-plan").Compile();
-        plan.IsZoneRedundant = true;
-        plan.Sku = new AppServiceSkuDescription
-        {
-            Name = "P1v3",
-            Tier = "PremiumV3",
-            Capacity = 2
-        };
-
-        var dashboard = resources.OfType<WebSite>().Single(resource => resource.BicepIdentifier == "dashboard");
-        dashboard.Name = BicepFunction.Interpolate($"{dashboardName}").Compile();
-        var dashboardIdentity = resources.OfType<Azure.Provisioning.Roles.UserAssignedIdentity>()
-            .Single(resource => resource.BicepIdentifier == "app_service_env_contributor_mi");
-        dashboardIdentity.Name = BicepFunction.Interpolate($"{dashboardName}-mi").Compile();
-
-        // Aspire's default URI expression is independent of the dashboard's customized site name.
-        var dashboardUri = resources.OfType<ProvisioningOutput>()
-            .Single(output => output.BicepIdentifier == "AZURE_APP_SERVICE_DASHBOARD_URI");
-        dashboardUri.Value = BicepFunction.Interpolate($"https://{dashboard.Name}.azurewebsites.net");
-    });
-
-if (builder.ExecutionContext.IsPublishMode)
-{
-    appService.WithAcrPullIdentity(sharedIdentity);
-    var registry = appService.Resource.ContainerRegistry
-        ?? throw new InvalidOperationException("The App Service environment must have a container registry.");
-    builder.CreateResourceBuilder(registry).ConfigureInfrastructure(infra =>
-    {
-        var acr = infra.GetProvisionableResources().OfType<ContainerRegistryService>().Single();
-        acr.Name = BicepFunction.Interpolate($"{registryName}").Compile();
-    });
-    sharedIdentity.WithRoleAssignments(builder.CreateResourceBuilder(registry),
-        ContainerRegistryBuiltInRole.AcrPull);
-}
-
-var apiSiteName = $"{projectName}-{env}-api";
 var redisName = $"{projectName}-{env}-redis";
 
 var api = builder.AddProject<Projects.ChaosToDo_Api>("api")
@@ -153,35 +106,106 @@ var api = builder.AddProject<Projects.ChaosToDo_Api>("api")
     .WithReference(sqlDb)
     .WithReference(cache)
     .WaitFor(sqlDb)
-    .WaitFor(cache)
-    .PublishAsAzureAppServiceWebsite( configure:(infra, site) =>
-    {
-        site.Name = BicepFunction.Interpolate($"{apiSiteName}").Compile();
-        var identityId = sharedIdentity.Resource.Id.AsProvisioningParameter(infra);
-        // Aspire adds separate app and ACR identity references even when both resolve to the same identity.
-        site.Identity.UserAssignedIdentities.Clear();
-        site.Identity.UserAssignedIdentities[BicepFunction.Interpolate($"{identityId}").Compile().ToString()] =
-            new UserAssignedIdentityDetails();
-    });
+    .WaitFor(cache);
 
+IResourceBuilder<AzureBicepResource>? windowsApi = null;
+IResourceBuilder<AzureBicepResource>? vmApi = null;
 if (builder.ExecutionContext.IsPublishMode)
 {
-    api.WithAzureUserAssignedIdentity(sharedIdentity)
-        .WithEnvironment(context =>
-        {
-            // The API only uses ConnectionStrings__cache; composing CACHE_URI would read the secret at deploy time.
-            context.EnvironmentVariables.Remove("CACHE_HOST");
-            context.EnvironmentVariables.Remove("CACHE_PORT");
-            context.EnvironmentVariables.Remove("CACHE_PASSWORD");
-            context.EnvironmentVariables.Remove("CACHE_URI");
-        });
+    api.ExcludeFromManifest();
+
+    var redisKeyVault = builder.Resources.OfType<AzureKeyVaultResource>()
+        .Single(resource => resource.Name == "cache-kv");
+    var workerCount = builder.Configuration.GetValue("Azure:WindowsAppServiceWorkerCount", 2);
+    if (workerCount is < 1 or > 3)
+    {
+        throw new InvalidOperationException("Azure:WindowsAppServiceWorkerCount must be between 1 and 3.");
+    }
+
+    windowsApi = builder.AddBicepTemplate("windows-app-service", "bicep/windows-app-service.bicep")
+        .WithParameter("apiSiteName", apiSiteName)
+        .WithParameter("apiPlanName", apiPlanName)
+        .WithParameter(
+            "workerCount",
+            workerCount.ToString(System.Globalization.CultureInfo.InvariantCulture))
+        .WithParameter("sqlServerName", $"{projectName}-{env}-sql")
+        .WithParameter("sqlDatabaseName", sqlDatabaseName)
+        .WithParameter("redisKeyVaultName", keyVaultName)
+        .WithParameter(
+            "redisKeyVaultUri",
+            ((IAzureKeyVaultResource)redisKeyVault).VaultUriOutputReference)
+        .WithParameter("identityId", sharedIdentity.Resource.Id)
+        .WithParameter("identityPrincipalId", sharedIdentity.Resource.PrincipalId)
+        .WithParameter("identityClientId", sharedIdentity.Resource.ClientId);
+
+    WindowsApiPublisher.Register(
+        api,
+        apiSiteName,
+        apiPlanName,
+        $"{projectName}-{env}-mi",
+        keyVaultName,
+        workerCount,
+        builder.Configuration["Azure:SubscriptionId"]
+            ?? throw new InvalidOperationException("Azure:SubscriptionId is required for Windows App Service deployment."),
+        builder.Configuration["Azure:ResourceGroup"]
+            ?? throw new InvalidOperationException("Azure:ResourceGroup is required for Windows App Service deployment."));
+
+    // -----------------------------------------------------------------------
+    // Linux VM scale set (one instance per zone) behind a Standard Load Balancer:
+    // the target of the Compute Zone Down scenario (VMSS shutdown keeps a zone
+    // powered off for the whole action duration).
+    // -----------------------------------------------------------------------
+    var vmssName = $"{projectName}-{env}-api-vmss";
+    var vmPublicIpName = $"{projectName}-{env}-api-pip";
+    var vmStorageAccountName = $"{projectName.Replace("-", string.Empty)}{env}st";
+    const string vmPackageContainerName = "api-packages";
+    var vmBootstrapPath = Path.Combine(builder.AppHostDirectory, "vm", "chaostodo-api-bootstrap.sh");
+    var vmAdminPassword = builder.AddParameter(
+        "vm-admin-password",
+        new GenerateParameterDefault { MinLength = 32, Special = false, MinLower = 2, MinUpper = 2, MinNumeric = 2 },
+        secret: true,
+        persist: true);
+
+    vmApi = builder.AddBicepTemplate("vm-api", "bicep/vm-api.bicep")
+        .WithParameter("vmssName", vmssName)
+        .WithParameter("loadBalancerName", $"{projectName}-{env}-api-lb")
+        .WithParameter("publicIpName", vmPublicIpName)
+        .WithParameter("dnsLabel", $"{projectName}-{env}-api-vm")
+        .WithParameter("vnetName", $"{projectName}-{env}-vnet")
+        .WithParameter("nsgName", $"{projectName}-{env}-api-nsg")
+        .WithParameter("storageAccountName", vmStorageAccountName)
+        .WithParameter("packageContainerName", vmPackageContainerName)
+        .WithParameter("vmSize", builder.Configuration["Azure:VmApiSize"] ?? "Standard_D2als_v7")
+        .WithParameter("adminPassword", vmAdminPassword)
+        .WithParameter("bootstrapScript", VmApiPublisher.ReadBootstrapTemplate(vmBootstrapPath))
+        .WithParameter("sqlServerName", $"{projectName}-{env}-sql")
+        .WithParameter("sqlDatabaseName", sqlDatabaseName)
+        .WithParameter(
+            "keyVaultUri",
+            ((IAzureKeyVaultResource)redisKeyVault).VaultUriOutputReference)
+        .WithParameter("identityId", sharedIdentity.Resource.Id)
+        .WithParameter("identityPrincipalId", sharedIdentity.Resource.PrincipalId)
+        .WithParameter("identityClientId", sharedIdentity.Resource.ClientId)
+        .WithParameter(AzureBicepResource.KnownParameters.UserPrincipalId);
+
+    VmApiPublisher.Register(api, new VmApiPublisher.Settings(
+        vmssName,
+        vmPublicIpName,
+        vmStorageAccountName,
+        vmPackageContainerName,
+        $"{projectName}-{env}-mi",
+        keyVaultName,
+        $"{projectName}-{env}-sql",
+        sqlDatabaseName,
+        vmBootstrapPath,
+        builder.Configuration["Azure:SubscriptionId"]!,
+        builder.Configuration["Azure:ResourceGroup"]!));
 }
 
 // ---------------------------------------------------------------------------
 // Azure Chaos Studio Workspace + custom compute/cache Scenarios.
-// Names are resolved deterministically above (rather than through Bicep
-// outputs) since every resource name here is already a fixed, compile-time
-// known string built from projectName/env.
+// The API name is linked from the Windows website template output so the
+// scenarios target the exact site created by the same publish model.
 //
 // Publish-only: a plain AddBicepTemplate resource has no RunAsContainer/
 // RunAsExisting equivalent, so without this guard `aspire run` would try to
@@ -208,8 +232,13 @@ if (builder.ExecutionContext.IsPublishMode)
         .WithParameter("identityId", failoverIdentity.Resource.Id)
         .WithParameter("identityPrincipalId", failoverIdentity.Resource.PrincipalId);
 
+    var windowsApiResource = windowsApi
+        ?? throw new InvalidOperationException("The Windows API Bicep template must be registered in publish mode.");
+    var vmApiResource = vmApi
+        ?? throw new InvalidOperationException("The VM API Bicep template must be registered in publish mode.");
     var chaosStudio = builder.AddBicepTemplate("chaos-studio", "bicep/chaos-studio.bicep")
-        .WithParameter("apiSiteName", apiSiteName)
+        .WithParameter("apiSiteName", windowsApiResource.GetOutput("siteName"))
+        .WithParameter("vmssName", vmApiResource.GetOutput("vmssName"))
         .WithParameter("redisName", redisName)
         .WithParameter("automationAccountName", automation.GetOutput("automationAccountName"));
 
@@ -219,6 +248,12 @@ if (builder.ExecutionContext.IsPublishMode)
         ?? throw new InvalidOperationException("Azure:SubscriptionId is required to publish the SQL failover runbook.");
     var resourceGroupName = builder.Configuration["Azure:ResourceGroup"]
         ?? throw new InvalidOperationException("Azure:ResourceGroup is required to publish the SQL failover runbook.");
+    chaosStudio.WithPipelineStepFactory("refresh-chaos-workspace",
+        context => ChaosWorkspacePublisher.RefreshAsync(
+            context, subscriptionId, resourceGroupName,
+            chaosStudio.GetOutput("workspaceName"), chaosStudio.GetOutput("defaultConfigurations")),
+        requiredBy: [WellKnownPipelineSteps.Deploy],
+        description: "Refresh discovery, evaluate scenarios, and validate IaC configurations without starting faults.");
     var runbookSource = File.ReadAllText(
         Path.Combine(builder.AppHostDirectory, "runbooks/sql-local-ha-failover.ps1"));
     automation.WithPipelineStepFactory(runbookReadyStep,
@@ -244,21 +279,58 @@ if (builder.ExecutionContext.IsPublishMode)
             readyStep.DependsOn(automationStep.Name);
         }
         var chaosSteps = context.GetSteps(chaosStudio.Resource, WellKnownPipelineTags.ProvisionInfrastructure).ToArray();
+        new[] { context.GetSteps(chaosStudio.Resource).Single(step => step.Name == "refresh-chaos-workspace") }
+            .DependsOn(chaosSteps);
         chaosSteps.DependsOn(readyStep);
         chaosSteps.DependsOn(context.GetSteps(sql.Resource, WellKnownPipelineTags.ProvisionInfrastructure));
         chaosSteps.DependsOn(context.GetSteps(cache.Resource, WellKnownPipelineTags.ProvisionInfrastructure));
 
-        // App Service creates the website deployment target during BeforeStart, not during --list-steps.
-        var website = api.Resource.GetDeploymentTargetAnnotation(appService.Resource)?.DeploymentTarget;
-        if (website is not null)
+        var windowsApiProvisioningSteps = context.GetSteps(
+            windowsApiResource.Resource,
+            WellKnownPipelineTags.ProvisionInfrastructure).ToArray();
+        if (windowsApiProvisioningSteps.Length == 0)
         {
-            var websiteSteps = context.GetSteps(website, WellKnownPipelineTags.ProvisionInfrastructure).ToArray();
-            if (websiteSteps.Length == 0)
-            {
-                throw new InvalidOperationException("The API website must have a provisioning step before Chaos Studio.");
-            }
-            chaosSteps.DependsOn(websiteSteps);
+            throw new InvalidOperationException("The Windows API Bicep template must have a provisioning step before Chaos Studio.");
         }
+        var windowsApiDeployStep = context.GetSteps(api.Resource)
+            .Single(step => step.Name == "deploy-windows-api");
+        new[] { windowsApiDeployStep }.DependsOn(windowsApiProvisioningSteps);
+        new[] { windowsApiDeployStep }.DependsOn(
+            context.GetSteps(sql.Resource, WellKnownPipelineTags.ProvisionInfrastructure));
+        new[] { windowsApiDeployStep }.DependsOn(
+            context.GetSteps(cache.Resource, WellKnownPipelineTags.ProvisionInfrastructure));
+        new[] { windowsApiDeployStep }.DependsOn(
+            context.GetSteps(sharedIdentity.Resource, WellKnownPipelineTags.ProvisionInfrastructure));
+        var redisKeyVaultResource = builder.Resources.OfType<AzureKeyVaultResource>()
+            .Single(resource => resource.Name == "cache-kv");
+        new[] { windowsApiDeployStep }.DependsOn(context.GetSteps(
+            redisKeyVaultResource,
+            WellKnownPipelineTags.ProvisionInfrastructure));
+
+        chaosSteps.DependsOn(windowsApiProvisioningSteps);
+        chaosSteps.DependsOn(context.GetSteps(api.Resource).Single(step => step.Name == "verify-windows-api"));
+
+        var vmApiProvisioningSteps = context.GetSteps(
+            vmApiResource.Resource,
+            WellKnownPipelineTags.ProvisionInfrastructure).ToArray();
+        if (vmApiProvisioningSteps.Length == 0)
+        {
+            throw new InvalidOperationException("The VM API Bicep template must have a provisioning step before Chaos Studio.");
+        }
+        vmApiProvisioningSteps.DependsOn(
+            context.GetSteps(sharedIdentity.Resource, WellKnownPipelineTags.ProvisionInfrastructure));
+        vmApiProvisioningSteps.DependsOn(
+            context.GetSteps(sql.Resource, WellKnownPipelineTags.ProvisionInfrastructure));
+        vmApiProvisioningSteps.DependsOn(context.GetSteps(
+            redisKeyVaultResource,
+            WellKnownPipelineTags.ProvisionInfrastructure));
+        var vmApiDeployStep = context.GetSteps(api.Resource)
+            .Single(step => step.Name == VmApiPublisher.DeployStep);
+        new[] { vmApiDeployStep }.DependsOn(vmApiProvisioningSteps);
+        new[] { vmApiDeployStep }.DependsOn(
+            context.GetSteps(cache.Resource, WellKnownPipelineTags.ProvisionInfrastructure));
+        chaosSteps.DependsOn(vmApiProvisioningSteps);
+        chaosSteps.DependsOn(context.GetSteps(api.Resource).Single(step => step.Name == VmApiPublisher.VerifyStep));
 
         return Task.CompletedTask;
     });

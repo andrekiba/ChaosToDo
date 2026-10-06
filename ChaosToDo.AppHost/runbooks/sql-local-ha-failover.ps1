@@ -51,12 +51,12 @@ function Send-Request([string] $method, [uri] $uri, [hashtable] $headers) {
 function Get-PollUri([string] $value) {
     $uri = [uri]::new([uri]'https://management.azure.com/', $value)
     $rgPrefix = $databaseId.Substring(0, $databaseId.IndexOf('/providers/', [StringComparison]::OrdinalIgnoreCase))
-    $regionalPattern = '^' + [regex]::Escape($rgPrefix) + '/providers/Microsoft.Sql/locations/[^/]+/databaseOperationResults/[^/]+$'
+    $regionalPattern = '^' + [regex]::Escape($rgPrefix) + '/providers/Microsoft.Sql/locations/[^/]+/(databaseOperationResults|databaseAzureAsyncOperation)/[^/]+$'
     $databasePattern = '^' + [regex]::Escape($databaseId) + '/operationResults/[^/]+$'
     if ($uri.Scheme -ne 'https' -or $uri.Host -ne 'management.azure.com' -or
         -not $uri.IsDefaultPort -or $uri.UserInfo -or $uri.Fragment -or
         ($uri.AbsolutePath -notmatch $regionalPattern -and $uri.AbsolutePath -notmatch $databasePattern)) {
-        throw "Unexpected LRO URI; refusing to send credentials: $uri"
+        throw "Unexpected LRO URI; refusing to send credentials: $($uri.GetLeftPart([UriPartial]::Path))"
     }
     if (-not $uri.Query) {
         $uri = [uri]::new($uri.AbsoluteUri + "?api-version=$apiVersion")
@@ -80,12 +80,21 @@ try {
     }
     Write-Output "Requesting one primary local HA failover on $databaseId (not zone loss or geo-failover)."
     $response = Send-Request 'POST' "https://management.azure.com${databaseId}/failover?replicaType=Primary&api-version=$apiVersion" $auth
+    Write-Output "SQL failover response: HTTP $($response.Status)"
+    foreach ($headerName in @('Location', 'Azure-AsyncOperation')) {
+        if ($response.Headers.ContainsKey($headerName)) {
+            $diagnosticUri = [uri]::new([uri]'https://management.azure.com/', $response.Headers[$headerName])
+            $queryKeys = ($diagnosticUri.Query.TrimStart('?') -split '&' |
+                Where-Object { $_ } | ForEach-Object { ($_ -split '=', 2)[0] }) -join ', '
+            Write-Output "SQL failover $headerName header path: $($diagnosticUri.GetLeftPart([UriPartial]::Path)); query keys: $queryKeys"
+        }
+    }
     $asyncStatus = $response.Headers.ContainsKey('Azure-AsyncOperation')
     if ($response.Status -eq 202) {
         $header = if ($asyncStatus) { 'Azure-AsyncOperation' } else { 'Location' }
         if (-not $response.Headers.ContainsKey($header)) { throw '202 without an LRO header. Outcome unknown; do not repeat POST.' }
         $pollUri = Get-PollUri $response.Headers[$header]
-        Write-Output "Polling accepted operation: $pollUri"
+        Write-Output "Polling accepted operation: $($pollUri.GetLeftPart([UriPartial]::Path))"
         while ($true) {
             $delay = 5
             if ($response.Headers.ContainsKey('Retry-After')) {
@@ -96,7 +105,7 @@ try {
                 $delay = [Math]::Max(1, $parsed)
             }
             if ([DateTimeOffset]::UtcNow.AddSeconds($delay) -ge $deadline) {
-                throw "LRO timeout at $pollUri. The operation may continue; do not repeat POST."
+                throw "LRO timeout at $($pollUri.GetLeftPart([UriPartial]::Path)). The operation may continue; do not repeat POST."
             }
             Start-Sleep -Seconds $delay
             $response = Send-Request 'GET' $pollUri $auth

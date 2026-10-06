@@ -14,7 +14,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Aspire.Hosting.Azure.AppService" Version="13.6.0" />
     <PackageReference Include="Aspire.Hosting.Azure.Redis" Version="13.6.0" />
     <PackageReference Include="Aspire.Hosting.Azure.Sql" Version="13.6.0" />
   </ItemGroup>
