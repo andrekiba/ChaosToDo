@@ -21,6 +21,9 @@ internal static class WindowsApiPublisher
     static readonly TimeSpan DeploymentTimeout = TimeSpan.FromMinutes(10);
     static readonly TimeSpan ReadinessTimeout = TimeSpan.FromMinutes(10);
 
+    /// <summary>
+    /// Registers the Windows API packaging, validation, deployment, and readiness pipeline steps.
+    /// </summary>
     public static void Register(
         IResourceBuilder<ProjectResource> api,
         string siteName,
@@ -93,6 +96,9 @@ internal static class WindowsApiPublisher
 
     }
 
+    /// <summary>
+    /// Publishes the API for win-x64, verifies its IIS hosting configuration, and creates a safe ZIP package.
+    /// </summary>
     static async Task BuildPackageAsync(
         PipelineStepContext context,
         ProjectResource api,
@@ -152,6 +158,9 @@ internal static class WindowsApiPublisher
         context.Logger.LogInformation("Created framework-dependent win-x64 API package at {PackagePath}.", zipPath);
     }
 
+    /// <summary>
+    /// Validates the existing Windows App Service configuration without provisioning or changing Azure resources.
+    /// </summary>
     static async Task ValidateExistingSiteAsync(
         PipelineStepContext context,
         string siteName,
@@ -177,6 +186,9 @@ internal static class WindowsApiPublisher
         context.Summary.Add("Existing Windows API site", "Validated without provisioning or modifying Azure resources.");
     }
 
+    /// <summary>
+    /// Validates the target site and shared identity before uploading the API package.
+    /// </summary>
     static async Task DeployAsync(
         PipelineStepContext context,
         string siteName,
@@ -208,6 +220,9 @@ internal static class WindowsApiPublisher
             packagePath);
     }
 
+    /// <summary>
+    /// Uploads the API package to an already validated site and waits for both readiness endpoints.
+    /// </summary>
     static async Task DeployCodeOnlyAsync(
         PipelineStepContext context,
         string siteName,
@@ -224,6 +239,9 @@ internal static class WindowsApiPublisher
         await VerifyReadinessAsync(context, siteName, subscriptionId, resourceGroupName);
     }
 
+    /// <summary>
+    /// Uploads an existing ZIP package to the specified Windows App Service site.
+    /// </summary>
     static async Task UploadPackageAsync(
         PipelineStepContext context,
         string siteName,
@@ -260,6 +278,9 @@ internal static class WindowsApiPublisher
 
     }
 
+    /// <summary>
+    /// Polls the HTTPS health and liveness endpoints until both respond successfully or the readiness deadline expires.
+    /// </summary>
     static async Task VerifyReadinessAsync(
         PipelineStepContext context,
         string siteName,
@@ -292,6 +313,9 @@ internal static class WindowsApiPublisher
             $"Windows API site '{siteName}' did not pass /health and /alive within 10 minutes (last result: {lastStatus ?? "no response"}).");
     }
 
+    /// <summary>
+    /// Checks whether an endpoint returns HTTP 200, treating request failures and per-request timeouts as not ready.
+    /// </summary>
     static async Task<bool> IsHealthyAsync(HttpClient client, Uri endpoint, CancellationToken cancellationToken)
     {
         try
@@ -309,6 +333,9 @@ internal static class WindowsApiPublisher
         }
     }
 
+    /// <summary>
+    /// Checks the site, plan, identity, access settings, and publishing policies against deployment requirements.
+    /// </summary>
     static async Task ValidateSiteAsync(
         PipelineStepContext context,
         string siteName,
@@ -414,6 +441,9 @@ internal static class WindowsApiPublisher
         }
     }
 
+    /// <summary>
+    /// Reads the site properties needed for Windows, HTTPS, plan, hostname, and identity validation.
+    /// </summary>
     static async Task<JsonElement> ReadSiteAsync(
         PipelineStepContext context,
         string siteName,
@@ -431,6 +461,9 @@ internal static class WindowsApiPublisher
                 "--output", "json"
             ]);
 
+    /// <summary>
+    /// Reads the App Service runtime, health-check, TLS, and publishing configuration.
+    /// </summary>
     static async Task<JsonElement> ReadWebConfigAsync(
         PipelineStepContext context,
         string siteName,
@@ -448,6 +481,9 @@ internal static class WindowsApiPublisher
                 "--output", "json"
             ]);
 
+    /// <summary>
+    /// Reads whether the specified FTP or SCM basic publishing credential policy is enabled.
+    /// </summary>
     static async Task<JsonElement> ReadPublishingCredentialsPolicyAsync(
         PipelineStepContext context,
         string siteName,
@@ -465,6 +501,9 @@ internal static class WindowsApiPublisher
                 "--output", "json"
             ]);
 
+    /// <summary>
+    /// Reads the App Service plan SKU, worker count, operating system, and zone redundancy settings.
+    /// </summary>
     static async Task<JsonElement> ReadPlanAsync(
         PipelineStepContext context,
         string planName,
@@ -480,6 +519,9 @@ internal static class WindowsApiPublisher
                 "--output", "json"
             ]);
 
+    /// <summary>
+    /// Reads the client and principal IDs of the configured user-assigned managed identity.
+    /// </summary>
     static async Task<JsonElement> ReadIdentityAsync(
         PipelineStepContext context,
         string identityName,
@@ -497,6 +539,9 @@ internal static class WindowsApiPublisher
                 "--output", "json"
             ]);
 
+    /// <summary>
+    /// Lists the Key Vault Secrets User role assignments for the identity at the vault scope.
+    /// </summary>
     static async Task<JsonElement> ReadKeyVaultSecretsUserAssignmentsAsync(
         PipelineStepContext context,
         string principalId,
@@ -515,6 +560,9 @@ internal static class WindowsApiPublisher
                 "--output", "json"
             ]);
 
+    /// <summary>
+    /// Reads the names of the required SQL and Redis connection settings without exposing their values.
+    /// </summary>
     static async Task<JsonElement> ReadConnectionSettingNamesAsync(
         PipelineStepContext context,
         string siteName,
@@ -532,6 +580,9 @@ internal static class WindowsApiPublisher
                 "--output", "json"
             ]);
 
+    /// <summary>
+    /// Reads the API app settings that must match the deployment's runtime and identity requirements.
+    /// </summary>
     static async Task<JsonElement> ReadAppSettingsAsync(
         PipelineStepContext context,
         string siteName,
@@ -549,6 +600,9 @@ internal static class WindowsApiPublisher
                 "--output", "json"
             ]);
 
+    /// <summary>
+    /// Runs Azure CLI and parses its standard output as JSON, surfacing malformed output as a validation error.
+    /// </summary>
     static async Task<JsonElement> RunAzJsonAsync(PipelineStepContext context, string[] arguments)
     {
         var result = await RunProcessAsync("az", arguments, context.CancellationToken, ProcessTimeout);
@@ -563,6 +617,9 @@ internal static class WindowsApiPublisher
         }
     }
 
+    /// <summary>
+    /// Runs a process with redirected output, cancellation and timeout handling, and sanitized failure diagnostics.
+    /// </summary>
     internal static async Task<ProcessResult> RunProcessAsync(
         string executable,
         IReadOnlyList<string> arguments,
@@ -596,8 +653,7 @@ internal static class WindowsApiPublisher
             {
                 var safeDetails = SanitizeDiagnostics(standardError);
                 throw new InvalidOperationException(
-                    $"{executable} exited with code {process.ExitCode}." +
-                    (safeDetails.Length == 0 ? string.Empty : $" {safeDetails}"));
+                    $"{executable} exited with code {process.ExitCode}.{(safeDetails.Length == 0 ? string.Empty : $" {safeDetails}")}");
             }
             return new ProcessResult(standardOutput, standardError);
         }
@@ -619,6 +675,9 @@ internal static class WindowsApiPublisher
         }
     }
 
+    /// <summary>
+    /// Creates a direct process invocation, resolving Windows Azure CLI launchers without passing arguments through a shell.
+    /// </summary>
     static ProcessStartInfo CreateProcessStartInfo(string executable, IReadOnlyList<string> arguments)
     {
         var startInfo = new ProcessStartInfo
@@ -677,6 +736,9 @@ internal static class WindowsApiPublisher
         return startInfo;
     }
 
+    /// <summary>
+    /// Compacts and bounds process diagnostics, then redacts common credential values.
+    /// </summary>
     static string SanitizeDiagnostics(string diagnostics)
     {
         var compact = diagnostics.Replace('\r', ' ').Replace('\n', ' ').Trim();
@@ -690,6 +752,9 @@ internal static class WindowsApiPublisher
             "$1<redacted>");
     }
 
+    /// <summary>
+    /// Ensures the named app setting exists and has the expected value.
+    /// </summary>
     static void EnsureAppSetting(JsonElement settings, string name, string expected)
     {
         var value = settings.EnumerateArray()
@@ -700,6 +765,9 @@ internal static class WindowsApiPublisher
         EnsureEquals(GetOptionalString(value, "value"), expected, $"app setting {name}");
     }
 
+    /// <summary>
+    /// Ensures a JSON array contains the expected string value.
+    /// </summary>
     static void EnsureContains(JsonElement values, string expected, string description)
     {
         if (values.ValueKind != JsonValueKind.Array ||
@@ -711,10 +779,16 @@ internal static class WindowsApiPublisher
         }
     }
 
+    /// <summary>
+    /// Gets a string property or throws when Azure omitted a valid string value.
+    /// </summary>
     static string GetRequiredString(JsonElement element, string propertyName) =>
         GetOptionalString(element, propertyName)
         ?? throw new InvalidOperationException($"Azure returned no '{propertyName}' value while validating the Windows API site.");
 
+    /// <summary>
+    /// Gets a JSON string property, returning null when it is absent or not a string.
+    /// </summary>
     static string? GetOptionalString(JsonElement element, string propertyName) =>
         element.ValueKind == JsonValueKind.Object &&
         element.TryGetProperty(propertyName, out var property) &&
@@ -722,16 +796,25 @@ internal static class WindowsApiPublisher
             ? property.GetString()
             : null;
 
+    /// <summary>
+    /// Gets a string property nested inside an optional JSON object.
+    /// </summary>
     static string? GetNestedOptionalString(JsonElement element, string parentName, string propertyName) =>
         element.ValueKind == JsonValueKind.Object &&
         element.TryGetProperty(parentName, out var parent)
             ? GetOptionalString(parent, propertyName)
             : null;
 
+    /// <summary>
+    /// Gets a Boolean property or throws when Azure omitted a valid Boolean value.
+    /// </summary>
     static bool GetRequiredBoolean(JsonElement element, string propertyName) =>
         GetOptionalBoolean(element, propertyName)
         ?? throw new InvalidOperationException($"Azure returned no '{propertyName}' value while validating the Windows API site.");
 
+    /// <summary>
+    /// Gets a JSON Boolean property, returning null when it is absent or not a Boolean.
+    /// </summary>
     static bool? GetOptionalBoolean(JsonElement element, string propertyName) =>
         element.ValueKind == JsonValueKind.Object &&
         element.TryGetProperty(propertyName, out var property) &&
@@ -739,6 +822,9 @@ internal static class WindowsApiPublisher
             ? property.GetBoolean()
             : null;
 
+    /// <summary>
+    /// Gets a 32-bit integer property or throws when Azure omitted a valid integer value.
+    /// </summary>
     static int GetRequiredInt32(JsonElement element, string propertyName) =>
         element.ValueKind == JsonValueKind.Object &&
         element.TryGetProperty(propertyName, out var property) &&
@@ -746,6 +832,9 @@ internal static class WindowsApiPublisher
             ? value
             : throw new InvalidOperationException($"Azure returned no '{propertyName}' value while validating the Windows API site.");
 
+    /// <summary>
+    /// Ensures a string setting matches its expected value using ordinal comparison.
+    /// </summary>
     static void EnsureEquals(string? actual, string expected, string description)
     {
         if (!string.Equals(actual, expected, StringComparison.Ordinal))
@@ -754,6 +843,9 @@ internal static class WindowsApiPublisher
         }
     }
 
+    /// <summary>
+    /// Ensures a Boolean setting matches its expected value.
+    /// </summary>
     static void EnsureEquals(bool actual, bool expected, string description)
     {
         if (actual != expected)

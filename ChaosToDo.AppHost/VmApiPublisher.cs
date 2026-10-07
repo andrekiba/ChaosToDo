@@ -37,6 +37,10 @@ internal static class VmApiPublisher
         string SubscriptionId,
         string ResourceGroupName);
 
+    /// <summary>
+    /// Registers package, deployment, readiness and code-only steps. Serializes the Linux
+    /// publish after the Windows publish to avoid concurrent writes to the project's obj directory.
+    /// </summary>
     public static void Register(IResourceBuilder<ProjectResource> api, Settings settings)
     {
         if (!Guid.TryParse(settings.SubscriptionId, out _))
@@ -82,9 +86,14 @@ internal static class VmApiPublisher
             description: "Deploy API code to the existing VM scale set without provisioning infrastructure.");
     }
 
+    /// <summary>Reads the shell template with Unix line endings for cloud-init and Run Command.</summary>
     public static string ReadBootstrapTemplate(string path) =>
         File.ReadAllText(path).Replace("\r\n", "\n", StringComparison.Ordinal);
 
+    /// <summary>
+    /// Publishes self-contained Linux binaries and creates a tar.gz with the API executable's
+    /// execute permissions preserved; records the archive path for subsequent deployment steps.
+    /// </summary>
     static async Task BuildPackageAsync(
         PipelineStepContext context,
         ProjectResource api,
@@ -139,6 +148,10 @@ internal static class VmApiPublisher
         context.Logger.LogInformation("Created self-contained linux-x64 API package at {PackagePath}.", packagePath);
     }
 
+    /// <summary>
+    /// Uploads versioned and latest packages, then reconciles and installs each VM sequentially.
+    /// Requires the bootstrap success marker so a successful ARM command alone cannot imply readiness.
+    /// </summary>
     static async Task DeployAsync(PipelineStepContext context, Settings settings, string packagePath)
     {
         if (!File.Exists(packagePath))
@@ -217,6 +230,10 @@ internal static class VmApiPublisher
         context.Summary.Add("VM API release", $"{settings.StorageAccountName}/{settings.PackageContainerName}/{release}");
     }
 
+    /// <summary>
+    /// Resolves the managed identity client ID and vault URI, then fills the shell template
+    /// with package and SQL connection settings without retrieving Redis secret values.
+    /// </summary>
     static async Task<string> RenderBootstrapAsync(PipelineStepContext context, Settings settings)
     {
         var identity = await RunAzJsonAsync(
@@ -257,6 +274,10 @@ internal static class VmApiPublisher
         return script;
     }
 
+    /// <summary>
+    /// Uploads a package using the deployer's Entra credentials. Retries only recognized
+    /// authorization failures while the newly assigned storage role propagates.
+    /// </summary>
     static async Task UploadBlobAsync(PipelineStepContext context, Settings settings, string packagePath, string blobName)
     {
         // The deployer's Storage Blob Data Contributor assignment is created by the same deployment
@@ -293,12 +314,17 @@ internal static class VmApiPublisher
         }
     }
 
+    /// <summary>Identifies CLI authorization errors eligible for the bounded storage RBAC retry.</summary>
     static bool IsAuthorizationFailure(Exception exception) =>
         exception.Message.Contains("AuthorizationPermissionMismatch", StringComparison.OrdinalIgnoreCase) ||
         exception.Message.Contains("AuthorizationFailure", StringComparison.OrdinalIgnoreCase) ||
         exception.Message.Contains("not authorized", StringComparison.OrdinalIgnoreCase) ||
         exception.Message.Contains("403", StringComparison.Ordinal);
 
+    /// <summary>
+    /// Reads VM model and power state and requires exactly one instance in each expected zone.
+    /// Returns instances ordered by zone for deterministic deployment.
+    /// </summary>
     static async Task<IReadOnlyList<VmssInstance>> ReadInstancesAsync(PipelineStepContext context, Settings settings)
     {
         var json = await RunAzJsonAsync(
@@ -335,6 +361,10 @@ internal static class VmApiPublisher
         return instances;
     }
 
+    /// <summary>
+    /// Resolves the load balancer DNS and waits for healthy API responses from both zones.
+    /// Fresh TCP connections exercise backend selection rather than a single pooled connection.
+    /// </summary>
     static async Task VerifyAsync(PipelineStepContext context, Settings settings)
     {
         var publicIp = await RunAzJsonAsync(
@@ -399,10 +429,13 @@ internal static class VmApiPublisher
         }
 
         throw new TimeoutException(
-            $"The VM API at {baseUri} did not serve healthy responses from zones {string.Join(", ", ExpectedZones)} within 10 minutes " +
-            $"(health={healthOk}, seen={string.Join(",", servedBy)}).");
+            $"The VM API at {baseUri} did not serve healthy responses from zones {string.Join(", ", ExpectedZones)} within 10 minutes (health={healthOk}, seen={string.Join(",", servedBy)}).");
     }
 
+    /// <summary>
+    /// Reads an endpoint status for readiness polling; transient HTTP failures return no status,
+    /// while caller cancellation still propagates.
+    /// </summary>
     static async Task<HttpStatusCode?> GetStatusAsync(HttpClient client, Uri endpoint, CancellationToken cancellationToken)
     {
         try
@@ -417,6 +450,7 @@ internal static class VmApiPublisher
         }
     }
 
+    /// <summary>Runs Azure CLI with the process timeout and returns detached JSON or a parsing error.</summary>
     static async Task<JsonElement> RunAzJsonAsync(PipelineStepContext context, string[] arguments)
     {
         var result = await WindowsApiPublisher.RunProcessAsync("az", arguments, context.CancellationToken, ProcessTimeout);
@@ -431,6 +465,7 @@ internal static class VmApiPublisher
         }
     }
 
+    /// <summary>Reads an optional JSON string without treating missing or differently typed values as strings.</summary>
     static string? GetString(JsonElement element, string propertyName) =>
         element.ValueKind == JsonValueKind.Object &&
         element.TryGetProperty(propertyName, out var property) &&
@@ -438,6 +473,7 @@ internal static class VmApiPublisher
             ? property.GetString()
             : null;
 
+    /// <summary>Reads a required Azure response string and fails explicitly when it is absent.</summary>
     static string GetRequiredString(JsonElement element, string propertyName) =>
         GetString(element, propertyName)
         ?? throw new InvalidOperationException($"Azure returned no '{propertyName}' value during the VM API deployment.");

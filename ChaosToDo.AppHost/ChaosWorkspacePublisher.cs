@@ -15,6 +15,10 @@ internal static class ChaosWorkspacePublisher
 {
     const string ApiVersion = "2026-08-01-preview";
 
+    /// <summary>
+    /// Refreshes discovery and evaluation, reapplies IaC default configurations and validates
+    /// their persisted parameters, actions and resolved targets. Never executes a scenario.
+    /// </summary>
     public static async Task RefreshAsync(
         PipelineStepContext context,
         string subscriptionId,
@@ -104,12 +108,14 @@ internal static class ChaosWorkspacePublisher
         context.Summary.Add("Chaos configurations", "Discovery refreshed; all default configurations ready. No faults started.");
         return;
 
+        // Read explicitly included resource IDs for case-insensitive targeting comparisons.
         static HashSet<string> ReadTargets(JsonElement properties) =>
             properties.GetProperty("resourceTargeting").GetProperty("include").GetProperty("resources")
                 .EnumerateArray().Select(resource => resource.GetString()
                     ?? throw new InvalidOperationException("Chaos target ID must be a string."))
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
+        // Preserve exact parameter key/value pairs when comparing desired and persisted defaults.
         static HashSet<(string Key, string Value)> ReadParameters(JsonElement properties) =>
         [
             .. properties.GetProperty("parameters").EnumerateArray()
@@ -120,12 +126,15 @@ internal static class ChaosWorkspacePublisher
                     throw new InvalidOperationException("Missing Chaos parameter value.")))
         ];
 
+        // Resolve workspace-relative paths with the preview API version.
         Uri UriFor(string path) => new(baseUri, $"{path}?api-version={ApiVersion}");
 
+        // Share ARM authentication/error handling and serialize optional JSON request bodies.
         Task<SqlFailoverRunbookPublisher.ArmResponse> SendAsync(HttpMethod method, string path, string? body = null) =>
             SqlFailoverRunbookPublisher.SendArmAsync(client, token, method, UriFor(path),
                 body is null ? null : new StringContent(body, Encoding.UTF8, "application/json"), context.CancellationToken);
 
+        // Start discovery/evaluation and wait on the returned operation or its latest-result endpoint.
         async Task RunOperationAsync(string action, string resultPath)
         {
             context.Logger.LogInformation("Refreshing Chaos workspace: {Operation}.", action);
@@ -133,6 +142,8 @@ internal static class ChaosWorkspacePublisher
             await WaitAsync(response.Location ?? UriFor(resultPath), "status");
         }
 
+        // Validate the workspace polling scope, then wait for success within ten minutes.
+        // Return detached result properties so the response JsonDocument can be disposed.
         async Task<JsonElement> WaitAsync(Uri uri, string statusProperty)
         {
             if (uri.Scheme != Uri.UriSchemeHttps || uri.Host != baseUri.Host ||

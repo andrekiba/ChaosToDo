@@ -11,6 +11,7 @@ using Microsoft.Extensions.Logging;
 #pragma warning disable ASPIREPIPELINES001
 namespace ChaosToDo.AppHost;
 
+/// <summary>Publishes the SQL HA failover runbook and provides authenticated ARM request handling.</summary>
 internal static partial class SqlFailoverRunbookPublisher
 {
     const string ArmEndpoint = "https://management.azure.com";
@@ -21,6 +22,10 @@ internal static partial class SqlFailoverRunbookPublisher
     const string RunbookName = "sql-local-ha-failover";
     static readonly TimeSpan PublishTimeout = TimeSpan.FromMinutes(10);
 
+    /// <summary>
+    /// Resolves the SQL target and failover identity, renders the runbook, imports its draft
+    /// and publishes it. Verifies both draft and published content without starting an Automation job.
+    /// </summary>
     public static async Task PublishAsync(
         PipelineStepContext context,
         string subscriptionId,
@@ -39,17 +44,12 @@ internal static partial class SqlFailoverRunbookPublisher
         var escapedSubscriptionId = parsedSubscriptionId.ToString();
         var escapedResourceGroupName = Uri.EscapeDataString(resourceGroupName);
         var identityUri = new Uri(
-            $"{ArmEndpoint}/subscriptions/{escapedSubscriptionId}/resourceGroups/{escapedResourceGroupName}" +
-            $"/providers/Microsoft.ManagedIdentity/userAssignedIdentities/{Uri.EscapeDataString(identityName)}" +
-            $"?api-version={IdentityApiVersion}");
+            $"{ArmEndpoint}/subscriptions/{escapedSubscriptionId}/resourceGroups/{escapedResourceGroupName}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/{Uri.EscapeDataString(identityName)}?api-version={IdentityApiVersion}");
         var databaseId =
-            $"/subscriptions/{escapedSubscriptionId}/resourceGroups/{resourceGroupName}" +
-            $"/providers/Microsoft.Sql/servers/{sqlServerName}/databases/{sqlDatabaseName}";
+            $"/subscriptions/{escapedSubscriptionId}/resourceGroups/{resourceGroupName}/providers/Microsoft.Sql/servers/{sqlServerName}/databases/{sqlDatabaseName}";
         var databaseUri = new Uri($"{ArmEndpoint}{databaseId}?api-version=2023-08-01");
         var runbookPath =
-            $"/subscriptions/{escapedSubscriptionId}/resourceGroups/{escapedResourceGroupName}" +
-            $"/providers/Microsoft.Automation/automationAccounts/{Uri.EscapeDataString(automationAccountName)}" +
-            $"/runbooks/{RunbookName}";
+            $"/subscriptions/{escapedSubscriptionId}/resourceGroups/{escapedResourceGroupName}/providers/Microsoft.Automation/automationAccounts/{Uri.EscapeDataString(automationAccountName)}/runbooks/{RunbookName}";
         var draftUri = new Uri($"{ArmEndpoint}{runbookPath}/draft/content?api-version={AutomationApiVersion}");
         var publishUri = new Uri($"{ArmEndpoint}{runbookPath}/draft/publish?api-version={PublishApiVersion}");
         var publishedContentUri = new Uri($"{ArmEndpoint}{runbookPath}/content?api-version={AutomationApiVersion}");
@@ -171,6 +171,10 @@ internal static partial class SqlFailoverRunbookPublisher
         context.Summary.Add("SQL failover runbook", "Imported, published, and content-verified; no Automation job was started.");
     }
 
+    /// <summary>
+    /// Sends one authenticated ARM request, capturing body, Location and Retry-After for polling.
+    /// Rejects unsuccessful responses and omits the URI query from the request error message.
+    /// </summary>
     internal static async Task<ArmResponse> SendArmAsync(
         HttpClient client,
         AccessToken token,
@@ -202,6 +206,10 @@ internal static partial class SqlFailoverRunbookPublisher
         return new ArmResponse(response.StatusCode, body, location, retryAfter);
     }
 
+    /// <summary>
+    /// Polls a validated publication URI with Retry-After delays and a ten-minute deadline.
+    /// Accepts documented terminal success responses and fails on operation errors or unknown states.
+    /// </summary>
     static async Task WaitForPublishAsync(
         HttpClient client,
         AccessToken token,
@@ -270,6 +278,10 @@ internal static partial class SqlFailoverRunbookPublisher
         }
     }
 
+    /// <summary>
+    /// Restricts publication polling to HTTPS ARM operation results on the expected runbook.
+    /// Requires an operation GUID and the publication API version before forwarding credentials.
+    /// </summary>
     static Uri ValidatePublishOperationUri(
         Uri location,
         string subscriptionId,
@@ -277,9 +289,7 @@ internal static partial class SqlFailoverRunbookPublisher
         string automationAccountName)
     {
         var runbookPath =
-            $"/subscriptions/{subscriptionId}/resourceGroups/{Uri.UnescapeDataString(resourceGroupName)}" +
-            $"/providers/Microsoft.Automation/automationAccounts/{Uri.UnescapeDataString(Uri.EscapeDataString(automationAccountName))}" +
-            $"/runbooks/{RunbookName}";
+            $"/subscriptions/{subscriptionId}/resourceGroups/{Uri.UnescapeDataString(resourceGroupName)}/providers/Microsoft.Automation/automationAccounts/{Uri.UnescapeDataString(Uri.EscapeDataString(automationAccountName))}/runbooks/{RunbookName}";
         var path = Uri.UnescapeDataString(location.AbsolutePath);
         // Azure returns the runbook-level path; the REST example also documents a draft-level path.
         var operationPrefixes = new[]
@@ -311,6 +321,7 @@ internal static partial class SqlFailoverRunbookPublisher
         return builder.Uri;
     }
 
+    /// <summary>Checks the remote script against the rendered source, ignoring only line-ending differences.</summary>
     static void EnsureContentMatches(string actual, string expected, string stage)
     {
         if (!string.Equals(NormalizeLineEndings(actual), NormalizeLineEndings(expected), StringComparison.Ordinal))
@@ -321,6 +332,7 @@ internal static partial class SqlFailoverRunbookPublisher
 
         return;
 
+        // Normalize Windows and legacy CR line endings before the ordinal content comparison.
         static string NormalizeLineEndings(string value) =>
             value.Replace("\r\n", "\n", StringComparison.Ordinal)
                 .Replace('\r', '\n');
@@ -332,6 +344,7 @@ internal static partial class SqlFailoverRunbookPublisher
         Uri? Location,
         TimeSpan? RetryAfter);
 
+    /// <summary>Matches the required publication API version as a complete query parameter.</summary>
     [GeneratedRegex("(?:\\?|&)api-version=2015-10-31(?:&|$)", RegexOptions.IgnoreCase, "en-IT")]
     private static partial Regex MyRegex();
 }

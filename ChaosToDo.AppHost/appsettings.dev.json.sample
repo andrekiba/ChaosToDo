@@ -1,9 +1,13 @@
 {
   "Azure": {
     "SubscriptionId": "<your-azure-subscription-id>",
-    "Location": "italynorth",
+    "Location": "<your-azure-location>",
     "AllowResourceGroupCreation": true,
-    "ResourceGroup": "chaos-todo-dev-rg"
+    "ResourceGroup": "<your-resource-group-name>",
+  },
+  "Demo": {
+    "VmApiSize": "Standard_D2als_v7",
+    "WindowsAppServiceWorkerCount": 2
   },
   "Logging": {
     "LogLevel": {

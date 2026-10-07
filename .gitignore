@@ -316,3 +316,6 @@ azure.yaml
 
 #aspire
 aspire-output/
+
+# Local deployment history
+/history.md
