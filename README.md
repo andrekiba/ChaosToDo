@@ -16,7 +16,7 @@ ma viene distribuito su due hosting:
 | App Service Windows | P1v3, 2 worker, non zone-redundant | Cache e SQL |
 | Azure SQL Database | Business Critical, 2 vCore, HA locale, non zone-redundant | Cambio della replica primaria |
 | Azure Managed Redis | Balanced_B0 | Flush della cache |
-| Chaos Studio + Automation | 4 scenari custom e runbook SQL | Iniezione e monitoraggio dei fault |
+| Chaos Studio + Automation | 5 scenari custom e runbook SQL | Iniezione e monitoraggio dei fault |
 
 App Service Kill Process riavvia subito il processo; non mantiene spenta una zona.
 Lo shutdown VMSS mantiene invece spente le VM selezionate per la durata del fault.
@@ -200,6 +200,15 @@ La protezione stampede e' **per processo**, non un lock distribuito globale.
 `runAfter` ordina flush e kill, ma il traffico puo' ripopolare Redis tra le azioni.
 Entrambe sono discrete: la durata dichiarata non mantiene cache vuota o processi
 spenti per due minuti.
+
+### Variante: Cache Stampede con Restart
+
+Con le stesse dashboard si puo' eseguire **`cache-stampede-with-restart` / `default`**.
+Questa copia usa App Service Restart con `SoftRestart=false` al posto di Kill Process.
+Flush e restart non hanno dipendenze e vengono orchestrati in parallelo: non significa
+che avvengano nello stesso istante, ne' garantisce Redis vuoto al ritorno dell'app.
+Osservare errori, latenza, cambi di PID e query durante il recupero. Il restart e' una
+azione discreta, non mantiene l'app spenta per tutta la durata dichiarata.
 
 ## Demo 4: Failover SQL HA locale
 

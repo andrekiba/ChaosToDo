@@ -340,6 +340,66 @@ resource cacheStampedeWithProcessCrashDefault 'Microsoft.Chaos/workspaces/scenar
   properties: cacheStampedeWithProcessCrashConfiguration
 }
 
+// Cache Stampede with App Service Restart.
+// Both discrete actions are eligible to start in parallel; their actual execution
+// times need not coincide, so an empty Redis at app startup is not guaranteed.
+resource cacheStampedeWithRestart 'Microsoft.Chaos/workspaces/scenarios@2026-08-01-preview' = {
+  parent: workspace
+  name: 'cache-stampede-with-restart'
+  properties: {
+    description: 'Flushes Redis and restarts the Windows App Service in parallel.'
+    parameters: []
+    actions: [
+      {
+        name: 'flush-cache'
+        actionId: 'microsoft-managedRedis-FlushDatabase/1.0'
+        description: 'Flush the Azure Managed Redis default database.'
+        duration: 'PT2M'
+        parameters: []
+        runAfter: {
+          behavior: 'All'
+          items: []
+        }
+      }
+      {
+        name: 'restartAppService'
+        actionId: 'microsoft-appService-Restart/1.0'
+        description: 'Restart the Windows App Service in parallel with the Redis flush.'
+        duration: 'PT2M'
+        parameters: [
+          {
+            key: 'SoftRestart'
+            value: 'false'
+          }
+        ]
+        runAfter: {
+          behavior: 'All'
+          items: []
+        }
+      }
+    ]
+  }
+}
+
+var cacheStampedeWithRestartConfiguration = {
+  scenarioId: cacheStampedeWithRestart.name
+  parameters: []
+  resourceTargeting: {
+    include: {
+      resources: [
+        existingRedis.id
+        existingSite.id
+      ]
+    }
+  }
+}
+
+resource cacheStampedeWithRestartDefault 'Microsoft.Chaos/workspaces/scenarios/configurations@2026-08-01-preview' = {
+  parent: cacheStampedeWithRestart
+  name: 'default'
+  properties: cacheStampedeWithRestartConfiguration
+}
+
 // Scenario 4: SQL local HA failover.
 // The StartRunbook Action starts a published Automation runbook. The runbook
 // submits one SQL Database primary failover request and waits for its ARM LRO.
@@ -398,5 +458,6 @@ output defaultConfigurations string = string([
   computeZoneDownConfiguration
   cacheStampedeConfiguration
   cacheStampedeWithProcessCrashConfiguration
+  cacheStampedeWithRestartConfiguration
   sqlLocalHaFailoverConfiguration
 ])

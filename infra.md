@@ -143,6 +143,7 @@ privilegi failover alla shared identity applicativa.
 | `compute-zone-down` | Shutdown VMSS, zona logica 2, `PT2M`, non graceful |
 | `cache-stampede` | Flush database Redis |
 | `cache-stampede-with-process-crash` | Flush, poi Kill Process con `runAfter` sul successo del flush |
+| `cache-stampede-with-restart` | Flush e App Service Restart in parallelo, `SoftRestart=false` |
 | `sql-local-ha-failover` | StartRunbook su Automation, limite `PT15M` |
 
 I target sono referenziati come `existing`. Ogni scenario ha una configurazione
